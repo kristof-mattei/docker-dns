@@ -172,7 +172,13 @@ class DockerMonitor(object):
 
         # bootstrap by inspecting all running containers
         for container in self._docker.containers():
-            for rec in self._inspect(container['Id']):
+            inspection = self._inspect(container['Id'])
+
+            # sometimes we get a container but upon inspection it's gone
+            if inspection is None:
+                continue
+
+            for rec in inspection:
                 if rec.running:
                     for addr in rec.addrs:
                         self._table.add(rec.name, addr)
