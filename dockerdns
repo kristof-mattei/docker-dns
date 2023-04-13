@@ -242,6 +242,10 @@ class DockerMonitor(object):
         state = get(rec, 'State', 'Running')
 
         networks = get(rec, 'NetworkSettings', 'Networks')
+        if networks is None:
+            log('Container %s doesn\'t have any networks. Skipping.' % name)
+            return None
+
         ip_addrs = self._get_addrs(networks)
 
         hostname = '%s.%s' % (get(rec, 'Config', 'Hostname'), self._domain)
