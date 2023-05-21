@@ -4,31 +4,37 @@
 # dockerdns - simple, automatic, self-contained dns server for docker
 
 # python 3 compatibility
-from __future__ import print_function
+# from __future__ import print_function
 
 # monkey patch everything
 from gevent import monkey
 monkey.patch_all()
 
-# python 3 compatibility
-from future import standard_library
+# # python 3 compatibility
+# from future import standard_library
 from functools import reduce
-standard_library.install_aliases()
-from builtins import map
-from builtins import str
-from builtins import object
+
+# standard_library.install_aliases()
+# from builtins import map
+# from builtins import str
+# from builtins import object
 
 # core
 import argparse
+
 from collections import defaultdict
 from collections import namedtuple
+
 from datetime import datetime
+
 import json
 import os
 import re
+
 import signal
 import sys
-import time
+
+# import time
 from urllib.parse import urlparse
 
 # libs
@@ -37,24 +43,25 @@ import docker
 import gevent
 from gevent import socket, threading
 from gevent.server import DatagramServer
-from gevent.resolver_ares import Resolver
+from gevent.resolver.ares import Resolver
 from ipaddress import ip_network, ip_address
 
 import urllib3
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-PROCESS = 'dockerdns'
-DOCKER_SOCK = 'unix:///docker.sock'
-DNS_BINDADDR = '0.0.0.0:53'
-DNS_RESOLVER = ['8.8.8.8']
+PROCESS = "dockerdns"
+DOCKER_SOCK = "unix:///docker.sock"
+DNS_BINDADDR = "0.0.0.0:53"
+DNS_RESOLVER = ["8.8.8.8"]
 DNS_RESOLVER_TIMEOUT = 3.0
-RE_VALIDNAME = re.compile('[^\w\d.-]')
+RE_VALIDNAME = re.compile("[^\w\d.-]")
 QUIET = 0
-EPILOG = '''
+EPILOG = """
 
-'''
+"""
 
-network_blacklist = os.environ.get('NETWORK_BLACKLIST')
+network_blacklist = os.environ.get("NETWORK_BLACKLIST")
 if not network_blacklist:
     network_blacklist = "255.255.255.255/32"
 
@@ -62,14 +69,14 @@ network_blacklist = network_blacklist.split()
 for i, network in enumerate(network_blacklist):
     network_blacklist[i] = ip_network(network)
 
-Container = namedtuple('Container', 'id, name, running, addrs')
+Container = namedtuple("Container", "id, name, running, addrs")
 
 
 def log(msg, *args):
     global QUIET
     if not QUIET:
         now = datetime.now().isoformat()
-        line = u'%s [%s] %s\n' % (now, PROCESS, msg % args)
+        line = "%s [%s] %s\n" % (now, PROCESS, msg % args)
         sys.stderr.write(line)
         sys.stderr.flush()
 
@@ -84,8 +91,7 @@ def contains(txt, *subs):
 
 
 class NameTable(object):
-
-    'Table mapping names to addresses'
+    "Table mapping names to addresses"
 
     def __init__(self, records):
         self._storage = defaultdict(set)
@@ -94,22 +100,26 @@ class NameTable(object):
             self.add(rec[0], rec[1])
 
     def add(self, name, addr):
-        if name.startswith('.'):
-            name = '*' + name
+        if name.startswith("."):
+            name = "*" + name
         key = self._key(name)
         if key:
             with self._lock:
                 for network in network_blacklist:
                     if addr and ip_address(addr) in network:
-                        log('skipping table.add %s -> %s (blacklisted network)', name, addr)
+                        log(
+                            "skipping table.add %s -> %s (blacklisted network)",
+                            name,
+                            addr,
+                        )
                         return
-                log('table.add %s -> %s', name, addr)
+                log("table.add %s -> %s", name, addr)
                 self._storage[key].add(addr)
 
                 # reverse map for PTR records
-                addr = '%s.in-addr.arpa' % '.'.join(reversed(addr.split('.')))
+                addr = "%s.in-addr.arpa" % ".".join(reversed(addr.split(".")))
                 key = self._key(addr)
-                log('table.add %s -> %s', addr, name)
+                log("table.add %s -> %s", addr, name)
                 self._storage[key].add(name)
 
     def get(self, name):
@@ -118,35 +128,40 @@ class NameTable(object):
             with self._lock:
                 res = self._storage.get(key)
 
-                wild = re.sub(r'^[^\.]+', '*', name)
+                wild = re.sub(r"^[^\.]+", "*", name)
                 wildkey = self._key(wild)
                 wildres = self._storage.get(wildkey)
 
                 if res:
-                    log('table.get %s with %s' % (name, ", ".join(addr for addr in res)))
+                    log(
+                        "table.get %s with %s" % (name, ", ".join(addr for addr in res))
+                    )
                 elif wildres:
-                    log('table.get %s with %s' % (name, ", ".join(addr for addr in wildres)))
+                    log(
+                        "table.get %s with %s"
+                        % (name, ", ".join(addr for addr in wildres))
+                    )
                     res = wildres
                 else:
-                    log('table.get %s with NoneType' % (name))
+                    log("table.get %s with NoneType" % (name))
                 return res
 
     def rename(self, old_name, new_name):
         if not old_name or not new_name:
             return
-        old_name = old_name.lstrip('/')
+        old_name = old_name.lstrip("/")
         old_key = self._key(old_name)
         new_key = self._key(new_name)
         with self._lock:
             self._storage[new_key] = self._storage.pop(old_key)
-            log('table.rename (%s -> %s)', old_name, new_name)
+            log("table.rename (%s -> %s)", old_name, new_name)
 
     def remove(self, name):
         key = self._key(name)
         if key:
             with self._lock:
                 if key in self._storage:
-                    log('table.remove %s', name)
+                    log("table.remove %s", name)
                     del self._storage[key]
 
     def _key(self, name):
@@ -158,13 +173,12 @@ class NameTable(object):
 
 
 class DockerMonitor(object):
-
-    'Reads events from Docker and updates the name table'
+    "Reads events from Docker and updates the name table"
 
     def __init__(self, client, table, domain):
         self._docker = client
         self._table = table
-        self._domain = domain.lstrip('.')
+        self._domain = domain.lstrip(".")
 
     def run(self):
         # start the event poller, but don't read from the stream yet
@@ -172,107 +186,124 @@ class DockerMonitor(object):
 
         # bootstrap by inspecting all running containers
         for container in self._docker.containers():
-            inspection = self._inspect(container['Id'])
+            inspection = self._inspect(container["Id"])
 
             # sometimes we get a container but upon inspection it's gone
             if inspection is None:
                 continue
 
             for rec in inspection:
+                if rec.id[:12] == rec.name[:12]:
+                    log("Skipping %s %s, as custom name is required" % (rec.id, rec.name))
+                    continue
+
                 if rec.running:
                     for addr in rec.addrs:
-                        self._table.add(rec.name, addr)
+                        if len(addr) != 0:
+                            print("adding %s, addr is None? %s" % (addr, len(addr)))
+                            self._table.add(rec.name, addr)
 
         # read the docker event stream and update the name table
         for raw in events:
             evt = json.loads(raw)
-            if evt.get('Type', 'container') == 'container':
-                cid = evt.get('id')
+            if evt.get("Type", "container") == "container":
+                cid = evt.get("id")
                 if cid is None:
-                    cid = evt.get('ID')
+                    cid = evt.get("ID")
                 if cid is None:
                     continue
-                status = evt.get('status')
-                if status in set(('start', 'die', 'rename')):
+                status = evt.get("status")
+                if status in set(("start", "die", "rename")):
                     try:
                         for rec in self._inspect(cid):
-                            if status == 'start':
-                                for addr in rec.addrs:
-                                    self._table.add(rec.name, addr)
+                            if status == "start":
 
-                            elif status == 'rename':
-                                old_name = get(evt, 'Actor', 'Attributes', 'oldName')
-                                new_name = get(evt, 'Actor', 'Attributes', 'name')
-                                old_name = '.'.join((old_name, self._domain))
-                                new_name = '.'.join((new_name, self._domain))
+                                if rec.id[:12] == rec.name[:12]:
+                                    log("Skipping %s %s, as custom name is required" % (rec.id, rec.name))
+                                    continue
+
+                                if rec.running:
+                                    for addr in rec.addrs:
+                                        if len(addr) != 0:
+                                            self._table.add(rec.name, addr)
+
+                            elif status == "rename":
+                                old_name = get(evt, "Actor", "Attributes", "oldName")
+                                new_name = get(evt, "Actor", "Attributes", "name")
+                                old_name = ".".join((old_name, self._domain))
+                                new_name = ".".join((new_name, self._domain))
                                 self._table.rename(old_name, new_name)
 
                             else:
                                 self._table.remove(rec.name)
 
                     except Exception as e:
-                        log('Error: %s', e)
+                        log("Error: %s", e)
 
     def _get_names(self, name, labels):
-        names = [ RE_VALIDNAME.sub('', name).rstrip('.') ]
+        names = [RE_VALIDNAME.sub("", name).rstrip(".")]
 
         labels = labels or {}
-        instance = int(labels.get('com.docker.compose.container-number', 1))
-        service = labels.get('com.docker.compose.service')
-        project = labels.get('com.docker.compose.project')
+        instance = int(labels.get("com.docker.compose.container-number", 1))
+        service = labels.get("com.docker.compose.service")
+        project = labels.get("com.docker.compose.project")
 
         if all((instance, service, project)):
-            names.append('%d.%s.%s' % (instance, service, project))
+            names.append("%d.%s.%s" % (instance, service, project))
 
             # the first instance of a service is available without number
             # prefix
             if instance == 1:
-                names.append('%s.%s' % (service, project))
+                names.append("%s.%s" % (service, project))
 
-        return [ '.'.join((name, self._domain)) for name in names ]
+        return [".".join((name, self._domain)) for name in names]
 
     def _get_addrs(self, networks):
-        return [ value['IPAddress'] for value in networks.values() ]
+        return [value["IPAddress"] for value in networks.values()]
 
     def _inspect(self, cid):
         # get full details on this container from docker
         rec = self._docker.inspect_container(cid)
 
         # ensure name is valid, and append our domain
-        name = get(rec, 'Name')
+        name = get(rec, "Name")
         if not name:
             return None
 
-        id_ = get(rec, 'Id')
-        labels = get(rec, 'Config', 'Labels')
-        state = get(rec, 'State', 'Running')
+        id_ = get(rec, "Id")
+        labels = get(rec, "Config", "Labels")
+        state = get(rec, "State", "Running")
 
-        networks = get(rec, 'NetworkSettings', 'Networks')
+        networks = get(rec, "NetworkSettings", "Networks")
         if networks is None:
-            log('Container %s doesn\'t have any networks. Skipping.' % name)
+            log("Container %s doesn't have any networks. Skipping." % name)
             return None
 
         ip_addrs = self._get_addrs(networks)
 
-        hostname = '%s.%s' % (get(rec, 'Config', 'Hostname'), self._domain)
-        containers = list(Container(id_, name, state, ip_addrs) for name in self._get_names(name, labels))
+        hostname = "%s.%s" % (get(rec, "Config", "Hostname"), self._domain)
+        containers = list(
+            Container(id_, name, state, ip_addrs)
+            for name in self._get_names(name, labels)
+        )
         return containers + [Container(id_, hostname, state, ip_addrs)]
 
 
 class DnsServer(DatagramServer):
 
-    '''
+    """
     Answers DNS queries against the name table, falling back to the recursive
     resolver (if present).
-    '''
+    """
 
     def __init__(self, bindaddr, table, dns_servers=None):
         DatagramServer.__init__(self, bindaddr)
         self._table = table
         self._resolver = None
         if dns_servers:
-            self._resolver = Resolver(servers=dns_servers,
-                timeout=DNS_RESOLVER_TIMEOUT, tries=1)
+            self._resolver = Resolver(
+                servers=dns_servers, timeout=DNS_RESOLVER_TIMEOUT, tries=1
+            )
 
     def handle(self, data, peer):
         rec = DNSRecord.parse(data)
@@ -286,15 +317,15 @@ class DnsServer(DatagramServer):
                 if rec.q.qtype == QTYPE.AAAA:
                     addrs = set()
             else:
-                tmp = self._gethostbyname('.'.join(rec.q.qname.label))
+                tmp = self._gethostbyname(".".join(rec.q.qname.label))
                 if tmp is not None:
                     addrs.add(tmp)
 
         elif rec.q.qtype in (QTYPE.PTR,):
-            key = '.'.join(rec.q.qname.label)
+            key = ".".join(rec.q.qname.label)
             names = self._table.get(key) or set()
             if not names:
-                addr = '.'.join(rec.q.qname.stripSuffix('in-addr.arpa').label)
+                addr = ".".join(rec.q.qname.stripSuffix("in-addr.arpa").label)
                 tmp = self._gethostbyaddr(addr)
                 if tmp is not None:
                     names.add(tmp)
@@ -302,7 +333,9 @@ class DnsServer(DatagramServer):
         self.socket.sendto(self._reply(rec, auth, addrs, names), peer)
 
     def _reply(self, rec, auth, addrs, names):
-        reply = DNSRecord(DNSHeader(id=rec.header.id, qr=1, aa=auth, ra=bool(self._resolver)), q=rec.q)
+        reply = DNSRecord(
+            DNSHeader(id=rec.header.id, qr=1, aa=auth, ra=bool(self._resolver)), q=rec.q
+        )
         for addr in addrs:
             reply.add_answer(RR(rec.q.qname, QTYPE.A, rdata=A(addr)))
         for name in names:
@@ -313,69 +346,90 @@ class DnsServer(DatagramServer):
         if not self._resolver:
             return None
         try:
+            print(name)
             return self._resolver.gethostbyname(name)
         except socket.gaierror as e:
             msg = str(e)
-            if not contains(msg, 'ETIMEOUT', 'ENOTFOUND'):
+            if not contains(msg, "ETIMEOUT", "ENOTFOUND"):
                 log(msg)
 
     def _gethostbyaddr(self, addr):
         if not self._resolver:
             return None
         try:
+            log("here: %s" % addr)
             res = self._resolver.gethostbyaddr(addr)
             if res:
                 return res[0]
             return None
         except socket.gaierror as e:
             msg = str(e)
-            if not contains(msg, 'ETIMEOUT', 'ENOTFOUND'):
+            if not contains(msg, "ETIMEOUT", "ENOTFOUND"):
                 log(msg)
 
 
 def stop(*servers):
+    print("RECEIVED STOP SIGNAL")
     for svr in servers:
         if svr.started:
             svr.stop()
     sys.exit(signal.SIGINT)
 
+
 def splitrecord(rec):
-    m = re.match('([a-zA-Z0-9_-]*|\*):((?:[12]?[0-9]{1,2}\.){3}(?:[12]?[0-9]{1,2}){1}$)', rec)
+    m = re.match(
+        "([a-zA-Z0-9_-]*|\*):((?:[12]?[0-9]{1,2}\.){3}(?:[12]?[0-9]{1,2}){1}$)", rec
+    )
     if not m:
-        log('--record has invalid format, expects: `--record <host>:<ip>`')
+        log("--record has invalid format, expects: `--record <host>:<ip>`")
         sys.exit(1)
     else:
         return (m.group(1), m.group(2))
 
+
 def check(args):
     url = urlparse(args.docker)
-    if url.scheme in ('unix','unix+http'):
+    if url.scheme in ("unix", "unix+http"):
         # check if the socket file exists
         if not os.path.exists(url.path):
-            log('unix socket %r does not exist', url.path)
+            log("unix socket %r does not exist", url.path)
             sys.exit(1)
 
 
 def parse_args():
-    docker_url = os.environ.get('DOCKER_HOST')
+    docker_url = os.environ.get("DOCKER_HOST")
     if not docker_url:
         docker_url = DOCKER_SOCK
-    parser = argparse.ArgumentParser(PROCESS, epilog=EPILOG,
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--docker', default=docker_url,
-        help='Url to docker TCP/UNIX socket')
-    parser.add_argument('--dns-bind', default=DNS_BINDADDR,
-        help='Bind address for DNS server')
-    parser.add_argument('--domain', default='docker',
-        help='Base domain name for registered services')
-    parser.add_argument('--resolver', default=DNS_RESOLVER, nargs='*',
-        help='Servers for recursive DNS resolution')
-    parser.add_argument('--no-recursion', action='store_const', const=1,
-        help='Disables recursive DNS queries')
-    parser.add_argument('-q', '--quiet', action='store_const', const=1,
-        help='Quiet mode')
-    parser.add_argument('-r', '--record', nargs="*", default=[],
-        help="Add a static record `name:host`")
+    parser = argparse.ArgumentParser(
+        PROCESS, epilog=EPILOG, formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument(
+        "--docker", default=docker_url, help="Url to docker TCP/UNIX socket"
+    )
+    parser.add_argument(
+        "--dns-bind", default=DNS_BINDADDR, help="Bind address for DNS server"
+    )
+    parser.add_argument(
+        "--domain", default="docker", help="Base domain name for registered services"
+    )
+    parser.add_argument(
+        "--resolver",
+        default=DNS_RESOLVER,
+        nargs="*",
+        help="Servers for recursive DNS resolution",
+    )
+    parser.add_argument(
+        "--no-recursion",
+        action="store_const",
+        const=1,
+        help="Disables recursive DNS queries",
+    )
+    parser.add_argument(
+        "-q", "--quiet", action="store_const", const=1, help="Quiet mode"
+    )
+    parser.add_argument(
+        "-r", "--record", nargs="*", default=[], help="Add a static record `name:host`"
+    )
     return parser.parse_args()
 
 
@@ -390,22 +444,26 @@ def main():
     resolver = () if args.no_recursion else args.resolver
     table = NameTable([(k + "." + args.domain, v) for (k, v) in args.record])
     tls_config = None
-    if args.docker.startswith('https://'):
+    if args.docker.startswith("https://"):
         tls_config = docker.tls.TLSConfig(verify=False)
 
-    log('DOCKER_HOST %s' % args.docker)
+    log("DOCKER_HOST %s" % args.docker)
     client = None
     try:
-        client = docker.Client(args.docker, version='auto', tls=tls_config)
-    except docker.errors.TLSParameterError, e:
-        log('Docker error: %s' % e)
+        client = docker.APIClient(args.docker, version="auto", tls=tls_config)
+    except docker.tls.errors.TLSParameterError as e:
+        log("Docker error: %s" % e)
         sys.exit(1)
     monitor = DockerMonitor(client, table, args.domain)
     dns = DnsServer(args.dns_bind, table, resolver)
-    gevent.signal(signal.SIGINT, stop, dns)
-    gevent.signal(signal.SIGTERM, stop, dns)
+    print ("Setting up handlers")
+    gevent.signal_handler(signal.SIGINT, stop, dns)
+    gevent.signal_handler(signal.SIGTERM, stop, dns)
+
     dns.start()
+
     gevent.wait([gevent.spawn(monitor.run)])
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

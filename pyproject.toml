@@ -1,0 +1,12 @@
+[tool.poetry]
+name = "docker-dns"
+description = "docker-dns"
+version = "0.1.0"
+authors = []
+
+[tool.poetry.dependencies]
+dnslib = "^0.9.23"
+gevent = {version = "^22.10.2", python = ">=2.7,<2.8 || >3.5"}
+future = "^0.18.3"
+python = ">=3.7"
+docker = "^6.1.2"
