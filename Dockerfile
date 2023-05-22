@@ -1,8 +1,8 @@
-FROM alpine:3.11
+FROM alpine:3.18
 
 RUN apk add --update --no-cache curl
 RUN apk add --update --no-cache g++
-RUN apk add --update --no-cache libev
+# RUN apk add --update --no-cache libev
 RUN apk add --update --no-cache libffi-dev
 # RUN apk add --update --no-cache libstdc++
 RUN apk add --update --no-cache python3
@@ -28,10 +28,10 @@ ADD poetry.lock ./
 ADD pyproject.toml ./
 
 RUN poetry install
-RUN apk del g++ python3-dev && \
+RUN apk del curl g++ libffi-dev python3-dev && \
     rm -rf /tmp/* && \
     rm -rf /var/cache/apk/*
 
 ADD dockerdns .
 
-ENTRYPOINT ["./dockerdns"]
+ENTRYPOINT ["poetry", "run", "python", "./dockerdns"]

@@ -7,7 +7,9 @@
 # from __future__ import print_function
 
 # monkey patch everything
+from typing import Self, Type
 from gevent import monkey
+
 monkey.patch_all()
 
 # # python 3 compatibility
@@ -93,13 +95,13 @@ def contains(txt, *subs):
 class NameTable(object):
     "Table mapping names to addresses"
 
-    def __init__(self, records):
+    def __init__(self, records: list[(str, str)]):
         self._storage = defaultdict(set)
         self._lock = threading.Lock()
         for rec in records:
             self.add(rec[0], rec[1])
 
-    def add(self, name, addr):
+    def add(self, name: str, addr: str):
         if name.startswith("."):
             name = "*" + name
         key = self._key(name)
@@ -122,7 +124,7 @@ class NameTable(object):
                 log("table.add %s -> %s", addr, name)
                 self._storage[key].add(name)
 
-    def get(self, name):
+    def get(self, name: str):
         key = self._key(name)
         if key:
             with self._lock:
@@ -146,9 +148,10 @@ class NameTable(object):
                     log("table.get %s with NoneType" % (name))
                 return res
 
-    def rename(self, old_name, new_name):
+    def rename(self, old_name: str, new_name: str):
         if not old_name or not new_name:
             return
+
         old_name = old_name.lstrip("/")
         old_key = self._key(old_name)
         new_key = self._key(new_name)
@@ -156,7 +159,7 @@ class NameTable(object):
             self._storage[new_key] = self._storage.pop(old_key)
             log("table.rename (%s -> %s)", old_name, new_name)
 
-    def remove(self, name):
+    def remove(self, name: str):
         key = self._key(name)
         if key:
             with self._lock:
@@ -164,7 +167,7 @@ class NameTable(object):
                     log("table.remove %s", name)
                     del self._storage[key]
 
-    def _key(self, name):
+    def _key(self, name: str):
         try:
             label = DNSLabel(name.lower()).label
             return label
@@ -175,7 +178,7 @@ class NameTable(object):
 class DockerMonitor(object):
     "Reads events from Docker and updates the name table"
 
-    def __init__(self, client, table, domain):
+    def __init__(self, client: docker.APIClient, table: NameTable, domain: str):
         self._docker = client
         self._table = table
         self._domain = domain.lstrip(".")
@@ -194,14 +197,19 @@ class DockerMonitor(object):
 
             for rec in inspection:
                 if rec.id[:12] == rec.name[:12]:
-                    log("Skipping %s %s, as custom name is required" % (rec.id, rec.name))
+                    log(
+                        "Skipping %s %s, as custom name is required"
+                        % (rec.id, rec.name)
+                    )
                     continue
 
                 if rec.running:
-                    for addr in rec.addrs:
-                        if len(addr) != 0:
-                            print("adding %s, addr is None? %s" % (addr, len(addr)))
-                            self._table.add(rec.name, addr)
+                    addrs = [addr for addr in rec.addrs if len(addr) != 0]
+                    for addr in addrs:
+                        print("adding %s, addr is None? %s" % (addr, len(addr)))
+                        self._table.add(rec.name, addr)
+
+        self._table.add("in-addr.arpa", "0.0.0.0")
 
         # read the docker event stream and update the name table
         for raw in events:
@@ -217,9 +225,11 @@ class DockerMonitor(object):
                     try:
                         for rec in self._inspect(cid):
                             if status == "start":
-
                                 if rec.id[:12] == rec.name[:12]:
-                                    log("Skipping %s %s, as custom name is required" % (rec.id, rec.name))
+                                    log(
+                                        "Skipping %s %s, as custom name is required"
+                                        % (rec.id, rec.name)
+                                    )
                                     continue
 
                                 if rec.running:
@@ -240,7 +250,7 @@ class DockerMonitor(object):
                     except Exception as e:
                         log("Error: %s", e)
 
-    def _get_names(self, name, labels):
+    def _get_names(self, name: str, labels: dict) -> list[str]:
         names = [RE_VALIDNAME.sub("", name).rstrip(".")]
 
         labels = labels or {}
@@ -258,28 +268,29 @@ class DockerMonitor(object):
 
         return [".".join((name, self._domain)) for name in names]
 
-    def _get_addrs(self, networks):
+    @staticmethod
+    def _get_addrs(networks) -> list[str]:
         return [value["IPAddress"] for value in networks.values()]
 
-    def _inspect(self, cid):
+    def _inspect(self, cid: str):
         # get full details on this container from docker
         rec = self._docker.inspect_container(cid)
 
         # ensure name is valid, and append our domain
-        name = get(rec, "Name")
+        name: str = get(rec, "Name")
         if not name:
             return None
 
-        id_ = get(rec, "Id")
-        labels = get(rec, "Config", "Labels")
-        state = get(rec, "State", "Running")
+        id_: str = get(rec, "Id")
+        labels: str = get(rec, "Config", "Labels")
+        state: str = get(rec, "State", "Running")
 
         networks = get(rec, "NetworkSettings", "Networks")
         if networks is None:
             log("Container %s doesn't have any networks. Skipping." % name)
             return None
 
-        ip_addrs = self._get_addrs(networks)
+        ip_addrs = DockerMonitor._get_addrs(networks)
 
         hostname = "%s.%s" % (get(rec, "Config", "Hostname"), self._domain)
         containers = list(
@@ -296,7 +307,7 @@ class DnsServer(DatagramServer):
     resolver (if present).
     """
 
-    def __init__(self, bindaddr, table, dns_servers=None):
+    def __init__(self, bindaddr: str, table: NameTable, dns_servers=None):
         DatagramServer.__init__(self, bindaddr)
         self._table = table
         self._resolver = None
@@ -305,7 +316,7 @@ class DnsServer(DatagramServer):
                 servers=dns_servers, timeout=DNS_RESOLVER_TIMEOUT, tries=1
             )
 
-    def handle(self, data, peer):
+    def handle(self, data: bytes, peer: str):
         rec = DNSRecord.parse(data)
         addrs = set()
         names = set()
@@ -317,47 +328,45 @@ class DnsServer(DatagramServer):
                 if rec.q.qtype == QTYPE.AAAA:
                     addrs = set()
             else:
-                tmp = self._gethostbyname(".".join(rec.q.qname.label))
+                tmp = self._gethostbyname(str(rec.q.qname))
                 if tmp is not None:
                     addrs.add(tmp)
 
         elif rec.q.qtype in (QTYPE.PTR,):
-            key = ".".join(rec.q.qname.label)
-            names = self._table.get(key) or set()
+            names = self._table.get(str(rec.q.qname)) or set()
             if not names:
-                addr = ".".join(rec.q.qname.stripSuffix("in-addr.arpa").label)
+                addr = str(rec.q.qname.stripSuffix("in-addr.arpa"))
                 tmp = self._gethostbyaddr(addr)
                 if tmp is not None:
                     names.add(tmp)
 
         self.socket.sendto(self._reply(rec, auth, addrs, names), peer)
 
-    def _reply(self, rec, auth, addrs, names):
+    def _reply(self, rec: DNSRecord, auth: bool, addrs: list[str], names: list[str]):
         reply = DNSRecord(
             DNSHeader(id=rec.header.id, qr=1, aa=auth, ra=bool(self._resolver)), q=rec.q
         )
         for addr in addrs:
+            print(addr)
             reply.add_answer(RR(rec.q.qname, QTYPE.A, rdata=A(addr)))
         for name in names:
             reply.add_answer(RR(rec.q.qname, QTYPE.PTR, rdata=PTR(name)))
         return reply.pack()
 
-    def _gethostbyname(self, name):
+    def _gethostbyname(self, name: str):
         if not self._resolver:
             return None
         try:
-            print(name)
             return self._resolver.gethostbyname(name)
         except socket.gaierror as e:
             msg = str(e)
             if not contains(msg, "ETIMEOUT", "ENOTFOUND"):
                 log(msg)
 
-    def _gethostbyaddr(self, addr):
+    def _gethostbyaddr(self, addr: str):
         if not self._resolver:
             return None
         try:
-            log("here: %s" % addr)
             res = self._resolver.gethostbyaddr(addr)
             if res:
                 return res[0]
@@ -368,15 +377,14 @@ class DnsServer(DatagramServer):
                 log(msg)
 
 
-def stop(*servers):
-    print("RECEIVED STOP SIGNAL")
+def stop(*servers: list[DnsServer]):
     for svr in servers:
         if svr.started:
             svr.stop()
     sys.exit(signal.SIGINT)
 
 
-def splitrecord(rec):
+def splitrecord(rec: str) -> tuple[str, str]:
     m = re.match(
         "([a-zA-Z0-9_-]*|\*):((?:[12]?[0-9]{1,2}\.){3}(?:[12]?[0-9]{1,2}){1}$)", rec
     )
@@ -387,7 +395,7 @@ def splitrecord(rec):
         return (m.group(1), m.group(2))
 
 
-def check(args):
+def check(args) -> None:
     url = urlparse(args.docker)
     if url.scheme in ("unix", "unix+http"):
         # check if the socket file exists
@@ -441,7 +449,8 @@ def main():
         args.record = map(splitrecord, args.record)
 
     QUIET = args.quiet
-    resolver = () if args.no_recursion else args.resolver
+    resolver = ()
+    # resolver = () if args.no_recursion else args.resolver
     table = NameTable([(k + "." + args.domain, v) for (k, v) in args.record])
     tls_config = None
     if args.docker.startswith("https://"):
@@ -456,7 +465,6 @@ def main():
         sys.exit(1)
     monitor = DockerMonitor(client, table, args.domain)
     dns = DnsServer(args.dns_bind, table, resolver)
-    print ("Setting up handlers")
     gevent.signal_handler(signal.SIGINT, stop, dns)
     gevent.signal_handler(signal.SIGTERM, stop, dns)
 
